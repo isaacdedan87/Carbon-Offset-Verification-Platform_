@@ -52,6 +52,6 @@ plan:
         - emulated-contract-publish:
             contract-name: carbon-verification
             emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
-            path: contracts/carbon-verification.clar
+            path: "contracts\\carbon-verification.clar"
             clarity-version: 3
       epoch: "3.1"
