@@ -126,3 +126,120 @@
 ;; Read-only functions
 (define-read-only (get-listing (listing-id uint))
     (map-get? listings listing-id))
+
+
+
+;; Add to existing maps
+(define-map offset-expiration uint uint) ;; offset-id -> expiration block height
+
+;; New public function
+(define-public (set-offset-expiration (offset-id uint) (blocks uint))
+    (let ((offset (unwrap! (map-get? verified-offsets offset-id) ERR-INVALID-AMOUNT)))
+        (if (is-eq tx-sender (var-get contract-owner))
+            (begin
+                (map-set offset-expiration offset-id (+ stacks-block-height blocks))
+                (ok true))
+            ERR-NOT-AUTHORIZED)))
+
+
+;; New map
+(define-map offset-ratings uint {
+    rating: uint,
+    rater-count: uint
+})
+
+;; New public function
+(define-public (rate-offset (offset-id uint) (rating uint))
+    (let ((current-rating (default-to {rating: u0, rater-count: u0} 
+                          (map-get? offset-ratings offset-id))))
+        (if (and (>= rating u1) (<= rating u5))
+            (begin
+                (map-set offset-ratings offset-id {
+                    rating: (+ (get rating current-rating) rating),
+                    rater-count: (+ (get rater-count current-rating) u1)
+                })
+                (ok true))
+            ERR-INVALID-AMOUNT)))
+
+
+;; New public function
+(define-public (verify-batch (offset-ids (list 10 uint)))
+    (let ((owner (var-get contract-owner)))
+        (if (is-eq tx-sender owner)
+            (begin
+                (map verify-single-offset offset-ids)
+                (ok true))
+            ERR-NOT-AUTHORIZED)))
+
+(define-private (verify-single-offset (offset-id uint))
+    (match (map-get? verified-offsets offset-id)
+        offset (map-set verified-offsets offset-id (merge offset {verified: true}))
+        false))
+
+
+
+;; New map
+(define-map transfer-history uint (list 10 {
+    from: principal,
+    to: principal,
+    block: uint
+}))
+
+;; New public function
+(define-public (record-transfer (offset-id uint) (recipient principal))
+    (let ((current-history (default-to (list) (map-get? transfer-history offset-id)))
+          (new-entry {
+              from: tx-sender,
+              to: recipient,
+              block: stacks-block-height
+          }))
+        (map-set transfer-history offset-id
+            (unwrap-panic (as-max-len? (concat (list new-entry) current-history) u10)))
+        (ok true)))
+
+
+
+;; New maps
+(define-map staked-offsets principal uint)
+(define-map staking-rewards principal uint)
+
+;; New public functions
+(define-public (stake-offsets (amount uint))
+    (let ((current-balance (ft-get-balance carbon-credit tx-sender)))
+        (if (>= current-balance amount)
+            (begin
+                (map-set staked-offsets tx-sender amount)
+                (try! (transfer amount tx-sender (as-contract tx-sender)))
+                (ok true))
+            ERR-INSUFFICIENT-BALANCE)))
+
+
+(define-public (unstake-offsets)
+    (let ((amount (unwrap! (map-get? staked-offsets tx-sender) ERR-INVALID-AMOUNT)))
+        (begin
+            (try! (mint amount tx-sender))
+            (map-set staked-offsets tx-sender u0)
+            (ok true)))
+    )
+
+
+
+;; New maps
+(define-map offset-bundles uint {
+    offsets: (list 10 uint),
+    price: uint,
+    available: bool
+})
+
+(define-data-var bundle-nonce uint u0)
+
+;; New public function
+(define-public (create-bundle (offset-ids (list 10 uint)) (bundle-price uint))
+    (let ((bundle-id (var-get bundle-nonce)))
+        (map-set offset-bundles bundle-id {
+            offsets: offset-ids,
+            price: bundle-price,
+            available: true
+        })
+        (var-set bundle-nonce (+ bundle-id u1))
+        (ok bundle-id)))
