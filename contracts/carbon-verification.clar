@@ -243,3 +243,124 @@
         })
         (var-set bundle-nonce (+ bundle-id u1))
         (ok bundle-id)))
+
+
+;; New map for quality scores
+(define-map offset-quality-scores uint {
+    environmental-impact: uint,
+    durability: uint,
+    community-benefit: uint
+})
+
+(define-public (set-quality-score (offset-id uint) 
+                                 (environmental uint) 
+                                 (durability uint) 
+                                 (community uint))
+    (let ((offset (unwrap! (map-get? verified-offsets offset-id) ERR-INVALID-AMOUNT)))
+        (if (is-eq tx-sender (var-get contract-owner))
+            (begin
+                (map-set offset-quality-scores offset-id {
+                    environmental-impact: environmental,
+                    durability: durability,
+                    community-benefit: community
+                })
+                (ok true))
+            ERR-NOT-AUTHORIZED)))
+
+
+
+;; Define categories
+(define-constant CATEGORY-REFORESTATION u1)
+(define-constant CATEGORY-RENEWABLE-ENERGY u2)
+(define-constant CATEGORY-METHANE-CAPTURE u3)
+
+(define-map offset-categories uint uint)
+
+(define-public (set-offset-category (offset-id uint) (category uint))
+    (let ((offset (unwrap! (map-get? verified-offsets offset-id) ERR-INVALID-AMOUNT)))
+        (if (and 
+            (is-eq tx-sender (var-get contract-owner))
+            (<= category u3))
+            (begin
+                (map-set offset-categories offset-id category)
+                (ok true))
+            ERR-NOT-AUTHORIZED)))
+
+
+(define-map referral-rewards principal uint)
+(define-constant REFERRAL-BONUS u100)
+
+(define-public (refer-new-user (new-user principal))
+    (let ((current-rewards (default-to u0 (map-get? referral-rewards tx-sender))))
+        (begin
+            (map-set referral-rewards tx-sender (+ current-rewards REFERRAL-BONUS))
+            (ok true))))
+
+
+(define-map staking-lock-time principal uint)
+(define-constant MIN-LOCK-PERIOD u1000)
+(define-constant LOCK-BONUS-RATE u5)
+
+(define-public (lock-stake (lock-blocks uint))
+    (let ((staked-amount (unwrap! (map-get? staked-offsets tx-sender) ERR-INVALID-AMOUNT)))
+        (if (>= lock-blocks MIN-LOCK-PERIOD)
+            (begin
+                (map-set staking-lock-time tx-sender (+ stacks-block-height lock-blocks))
+                (ok true))
+            ERR-INVALID-AMOUNT)))
+
+
+(define-constant TIER-BASIC u1)
+(define-constant TIER-PREMIUM u2)
+(define-constant TIER-GOLD u3)
+
+(define-map offset-tiers uint uint)
+
+(define-public (set-offset-tier (offset-id uint) (tier uint))
+    (let ((offset (unwrap! (map-get? verified-offsets offset-id) ERR-INVALID-AMOUNT)))
+        (if (and 
+            (is-eq tx-sender (var-get contract-owner))
+            (<= tier u3))
+            (begin
+                (map-set offset-tiers offset-id tier)
+                (ok true))
+            ERR-NOT-AUTHORIZED)))
+
+
+(define-map price-adjustment-factors uint uint)
+(define-constant BASE-PRICE u1000)
+
+(define-public (set-price-adjustment (offset-id uint) (factor uint))
+    (let ((offset (unwrap! (map-get? verified-offsets offset-id) ERR-INVALID-AMOUNT)))
+        (if (is-eq tx-sender (var-get contract-owner))
+            (begin
+                (map-set price-adjustment-factors offset-id factor)
+                (ok true))
+            ERR-NOT-AUTHORIZED)))
+
+(define-read-only (get-adjusted-price (offset-id uint))
+    (let ((factor (default-to u100 (map-get? price-adjustment-factors offset-id))))
+        (* BASE-PRICE factor)))
+
+
+
+
+(define-map project-milestones uint (list 5 {
+    description: (string-utf8 50),
+    completed: bool,
+    completion-block: uint
+}))
+
+(define-public (add-milestone (offset-id uint) (description (string-utf8 50)))
+    (let ((current-milestones (default-to (list) (map-get? project-milestones offset-id))))
+        (if (is-eq tx-sender (var-get contract-owner))
+            (begin
+                (map-set project-milestones offset-id
+                    (unwrap-panic (as-max-len? 
+                        (concat current-milestones (list {
+                            description: description,
+                            completed: false,
+                            completion-block: u0
+                        })) u5)))
+                (ok true))
+            ERR-NOT-AUTHORIZED)))
