@@ -435,3 +435,74 @@
 
 (define-read-only (get-current-price)
     (var-get last-price))
+
+
+
+(define-map validation-rules uint {
+    min-amount: uint,
+    max-amount: uint,
+    required-rating: uint,
+    min-duration: uint
+})
+
+(define-data-var rule-counter uint u0)
+
+(define-public (add-validation-rule (min-amount uint) 
+                                  (max-amount uint)
+                                  (required-rating uint)
+                                  (min-duration uint))
+    (let ((rule-id (var-get rule-counter)))
+        (if (is-eq tx-sender (var-get contract-owner))
+            (begin
+                (map-set validation-rules rule-id {
+                    min-amount: min-amount,
+                    max-amount: max-amount,
+                    required-rating: required-rating,
+                    min-duration: min-duration
+                })
+                (var-set rule-counter (+ rule-id u1))
+                (ok rule-id))
+            ERR-NOT-AUTHORIZED)))
+
+(define-public (validate-offset (offset-id uint) (rule-id uint))
+    (let ((offset (unwrap! (map-get? verified-offsets offset-id) ERR-INVALID-AMOUNT))
+          (rule (unwrap! (map-get? validation-rules rule-id) ERR-INVALID-AMOUNT)))
+        (if (and
+            (>= (get amount offset) (get min-amount rule))
+            (<= (get amount offset) (get max-amount rule)))
+            (ok true)
+            ERR-INVALID-AMOUNT)))
+
+
+(define-map dynamic-bundles uint {
+    offset-ids: (list 10 uint),
+    total-amount: uint,
+    verification-status: (list 10 bool),
+    creation-height: uint,
+    metadata-uri: (string-utf8 256)
+})
+
+(define-data-var bundle-counter uint u0)
+
+(define-public (create-dynamic-bundle (offset-ids (list 10 uint)) (metadata-uri (string-utf8 256)))
+    (let ((bundle-id (var-get bundle-counter))
+          (verification-status (map get-verification-status offset-ids))
+          (total-amount (fold + (map get-offset-amount offset-ids) u0)))
+        (map-set dynamic-bundles bundle-id {
+            offset-ids: offset-ids,
+            total-amount: total-amount,
+            verification-status: verification-status,
+            creation-height: stacks-block-height,
+            metadata-uri: metadata-uri
+        })
+        (var-set bundle-counter (+ bundle-id u1))
+        (ok bundle-id)))
+
+(define-private (get-verification-status (offset-id uint))
+    (default-to false (get verified (map-get? verified-offsets offset-id))))
+
+(define-private (get-offset-amount (offset-id uint))
+    (default-to u0 (get amount (map-get? verified-offsets offset-id))))
+
+(define-read-only (get-bundle-details (bundle-id uint))
+    (map-get? dynamic-bundles bundle-id))
