@@ -472,37 +472,3 @@
             (<= (get amount offset) (get max-amount rule)))
             (ok true)
             ERR-INVALID-AMOUNT)))
-
-
-(define-map dynamic-bundles uint {
-    offset-ids: (list 10 uint),
-    total-amount: uint,
-    verification-status: (list 10 bool),
-    creation-height: uint,
-    metadata-uri: (string-utf8 256)
-})
-
-(define-data-var bundle-counter uint u0)
-
-(define-public (create-dynamic-bundle (offset-ids (list 10 uint)) (metadata-uri (string-utf8 256)))
-    (let ((bundle-id (var-get bundle-counter))
-          (verification-status (map get-verification-status offset-ids))
-          (total-amount (fold + (map get-offset-amount offset-ids) u0)))
-        (map-set dynamic-bundles bundle-id {
-            offset-ids: offset-ids,
-            total-amount: total-amount,
-            verification-status: verification-status,
-            creation-height: stacks-block-height,
-            metadata-uri: metadata-uri
-        })
-        (var-set bundle-counter (+ bundle-id u1))
-        (ok bundle-id)))
-
-(define-private (get-verification-status (offset-id uint))
-    (default-to false (get verified (map-get? verified-offsets offset-id))))
-
-(define-private (get-offset-amount (offset-id uint))
-    (default-to u0 (get amount (map-get? verified-offsets offset-id))))
-
-(define-read-only (get-bundle-details (bundle-id uint))
-    (map-get? dynamic-bundles bundle-id))
