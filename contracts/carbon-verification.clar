@@ -364,3 +364,111 @@
                         })) u5)))
                 (ok true))
             ERR-NOT-AUTHORIZED)))
+
+
+;; Add new map
+(define-map scheduled-retirements uint {
+    retirement-height: uint,
+    amount: uint,
+    beneficiary: principal
+})
+
+(define-data-var retirement-nonce uint u0)
+
+;; Schedule retirement
+(define-public (schedule-retirement (amount uint) (blocks-until-retirement uint) (beneficiary principal))
+    (let 
+        ((retirement-id (var-get retirement-nonce))
+         (current-balance (ft-get-balance carbon-credit tx-sender)))
+        (if (>= current-balance amount)
+            (begin
+                (try! (transfer amount tx-sender (as-contract tx-sender)))
+                (map-set scheduled-retirements retirement-id {
+                    retirement-height: (+ stacks-block-height blocks-until-retirement),
+                    amount: amount,
+                    beneficiary: beneficiary
+                })
+                (var-set retirement-nonce (+ retirement-id u1))
+                (ok retirement-id))
+            ERR-INSUFFICIENT-BALANCE)))
+
+(define-public (execute-retirement (retirement-id uint))
+    (let ((retirement (unwrap! (map-get? scheduled-retirements retirement-id) ERR-INVALID-AMOUNT)))
+        (if (>= stacks-block-height (get retirement-height retirement))
+            (begin
+                (try! (as-contract (ft-burn? carbon-credit (get amount retirement) (get beneficiary retirement))))
+                (ok true))
+            ERR-NOT-AUTHORIZED)))
+
+
+
+(define-map price-oracle-data uint {
+    price: uint,
+    timestamp: uint,
+    oracle: principal
+})
+
+(define-map authorized-oracles principal bool)
+
+(define-data-var last-price uint u0)
+(define-data-var price-update-threshold uint u100)
+
+(define-public (register-oracle (oracle principal))
+    (if (is-eq tx-sender (var-get contract-owner))
+        (begin
+            (map-set authorized-oracles oracle true)
+            (ok true))
+        ERR-NOT-AUTHORIZED))
+
+(define-public (update-price (new-price uint))
+    (let ((is-oracle (default-to false (map-get? authorized-oracles tx-sender))))
+        (if is-oracle
+            (begin
+                (map-set price-oracle-data stacks-block-height {
+                    price: new-price,
+                    timestamp: stacks-block-height,
+                    oracle: tx-sender
+                })
+                (var-set last-price new-price)
+                (ok true))
+            ERR-NOT-AUTHORIZED)))
+
+(define-read-only (get-current-price)
+    (var-get last-price))
+
+
+
+(define-map validation-rules uint {
+    min-amount: uint,
+    max-amount: uint,
+    required-rating: uint,
+    min-duration: uint
+})
+
+(define-data-var rule-counter uint u0)
+
+(define-public (add-validation-rule (min-amount uint) 
+                                  (max-amount uint)
+                                  (required-rating uint)
+                                  (min-duration uint))
+    (let ((rule-id (var-get rule-counter)))
+        (if (is-eq tx-sender (var-get contract-owner))
+            (begin
+                (map-set validation-rules rule-id {
+                    min-amount: min-amount,
+                    max-amount: max-amount,
+                    required-rating: required-rating,
+                    min-duration: min-duration
+                })
+                (var-set rule-counter (+ rule-id u1))
+                (ok rule-id))
+            ERR-NOT-AUTHORIZED)))
+
+(define-public (validate-offset (offset-id uint) (rule-id uint))
+    (let ((offset (unwrap! (map-get? verified-offsets offset-id) ERR-INVALID-AMOUNT))
+          (rule (unwrap! (map-get? validation-rules rule-id) ERR-INVALID-AMOUNT)))
+        (if (and
+            (>= (get amount offset) (get min-amount rule))
+            (<= (get amount offset) (get max-amount rule)))
+            (ok true)
+            ERR-INVALID-AMOUNT)))
