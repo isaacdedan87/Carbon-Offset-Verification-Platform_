@@ -438,3 +438,86 @@
 
 
 
+(define-map vesting-schedules uint {
+    total-amount: uint,
+    amount-per-period: uint,
+    periods-remaining: uint,
+    period-length: uint,
+    next-retirement: uint,
+    beneficiary: principal
+})
+
+(define-data-var schedule-nonce uint u0)
+
+(define-public (create-vesting-schedule 
+    (total-amount uint) 
+    (periods uint)
+    (period-length uint)
+    (beneficiary principal))
+    (let 
+        ((schedule-id (var-get schedule-nonce))
+         (amount-per-period (/ total-amount periods)))
+        (try! (transfer total-amount tx-sender (as-contract tx-sender)))
+        (map-set vesting-schedules schedule-id {
+            total-amount: total-amount,
+            amount-per-period: amount-per-period,
+            periods-remaining: periods,
+            period-length: period-length,
+            next-retirement: (+ stacks-block-height period-length),
+            beneficiary: beneficiary
+        })
+        (var-set schedule-nonce (+ schedule-id u1))
+        (ok schedule-id)))
+
+(define-public (process-vesting-retirement (schedule-id uint))
+    (let ((schedule (unwrap! (map-get? vesting-schedules schedule-id) (err u105))))
+        (if (and 
+            (> (get periods-remaining schedule) u0)
+            (>= stacks-block-height (get next-retirement schedule)))
+            (begin
+                (try! (as-contract (ft-burn? carbon-credit 
+                    (get amount-per-period schedule)
+                    (get beneficiary schedule))))
+                (map-set vesting-schedules schedule-id
+                    (merge schedule {
+                        periods-remaining: (- (get periods-remaining schedule) u1),
+                        next-retirement: (+ (get next-retirement schedule) 
+                                          (get period-length schedule))
+                    }))
+                (ok true))
+            ERR-NOT-AUTHORIZED)))
+
+
+
+(define-map volume-discount-tiers uint {
+    min-amount: uint,
+    discount-bps: uint
+})
+
+(define-data-var base-price-per-credit uint u1000)
+(define-data-var tier-count uint u0)
+
+(define-public (add-discount-tier (min-amount uint) (discount-bps uint))
+    (if (is-eq tx-sender (var-get contract-owner))
+        (begin
+            (map-set volume-discount-tiers (var-get tier-count) {
+                min-amount: min-amount,
+                discount-bps: discount-bps
+            })
+            (var-set tier-count (+ (var-get tier-count) u1))
+            (ok true))
+        ERR-NOT-AUTHORIZED))
+
+(define-read-only (calculate-discounted-price (amount uint))
+    (let ((base-total (* amount (var-get base-price-per-credit))))
+        (fold check-tier-discount
+              (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9)
+              base-total)))
+(define-private (check-tier-discount (tier uint) (current-price uint))
+    (match (map-get? volume-discount-tiers tier)
+        discount-tier
+        (if (>= current-price (get min-amount discount-tier))
+            (- current-price 
+               (/ (* current-price (get discount-bps discount-tier)) u10000))
+            current-price)
+        current-price))
