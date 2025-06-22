@@ -364,3 +364,301 @@
                         })) u5)))
                 (ok true))
             ERR-NOT-AUTHORIZED)))
+
+
+;; Add new map
+(define-map scheduled-retirements uint {
+    retirement-height: uint,
+    amount: uint,
+    beneficiary: principal
+})
+
+(define-data-var retirement-nonce uint u0)
+
+;; Schedule retirement
+(define-public (schedule-retirement (amount uint) (blocks-until-retirement uint) (beneficiary principal))
+    (let 
+        ((retirement-id (var-get retirement-nonce))
+         (current-balance (ft-get-balance carbon-credit tx-sender)))
+        (if (>= current-balance amount)
+            (begin
+                (try! (transfer amount tx-sender (as-contract tx-sender)))
+                (map-set scheduled-retirements retirement-id {
+                    retirement-height: (+ stacks-block-height blocks-until-retirement),
+                    amount: amount,
+                    beneficiary: beneficiary
+                })
+                (var-set retirement-nonce (+ retirement-id u1))
+                (ok retirement-id))
+            ERR-INSUFFICIENT-BALANCE)))
+
+(define-public (execute-retirement (retirement-id uint))
+    (let ((retirement (unwrap! (map-get? scheduled-retirements retirement-id) ERR-INVALID-AMOUNT)))
+        (if (>= stacks-block-height (get retirement-height retirement))
+            (begin
+                (try! (as-contract (ft-burn? carbon-credit (get amount retirement) (get beneficiary retirement))))
+                (ok true))
+            ERR-NOT-AUTHORIZED)))
+
+
+
+(define-map price-oracle-data uint {
+    price: uint,
+    timestamp: uint,
+    oracle: principal
+})
+
+(define-map authorized-oracles principal bool)
+
+(define-data-var last-price uint u0)
+(define-data-var price-update-threshold uint u100)
+
+(define-public (register-oracle (oracle principal))
+    (if (is-eq tx-sender (var-get contract-owner))
+        (begin
+            (map-set authorized-oracles oracle true)
+            (ok true))
+        ERR-NOT-AUTHORIZED))
+
+(define-public (update-price (new-price uint))
+    (let ((is-oracle (default-to false (map-get? authorized-oracles tx-sender))))
+        (if is-oracle
+            (begin
+                (map-set price-oracle-data stacks-block-height {
+                    price: new-price,
+                    timestamp: stacks-block-height,
+                    oracle: tx-sender
+                })
+                (var-set last-price new-price)
+                (ok true))
+            ERR-NOT-AUTHORIZED)))
+
+(define-read-only (get-current-price)
+    (var-get last-price))
+
+
+
+(define-map vesting-schedules uint {
+    total-amount: uint,
+    amount-per-period: uint,
+    periods-remaining: uint,
+    period-length: uint,
+    next-retirement: uint,
+    beneficiary: principal
+})
+
+(define-data-var schedule-nonce uint u0)
+
+(define-public (create-vesting-schedule 
+    (total-amount uint) 
+    (periods uint)
+    (period-length uint)
+    (beneficiary principal))
+    (let 
+        ((schedule-id (var-get schedule-nonce))
+         (amount-per-period (/ total-amount periods)))
+        (try! (transfer total-amount tx-sender (as-contract tx-sender)))
+        (map-set vesting-schedules schedule-id {
+            total-amount: total-amount,
+            amount-per-period: amount-per-period,
+            periods-remaining: periods,
+            period-length: period-length,
+            next-retirement: (+ stacks-block-height period-length),
+            beneficiary: beneficiary
+        })
+        (var-set schedule-nonce (+ schedule-id u1))
+        (ok schedule-id)))
+
+(define-public (process-vesting-retirement (schedule-id uint))
+    (let ((schedule (unwrap! (map-get? vesting-schedules schedule-id) (err u105))))
+        (if (and 
+            (> (get periods-remaining schedule) u0)
+            (>= stacks-block-height (get next-retirement schedule)))
+            (begin
+                (try! (as-contract (ft-burn? carbon-credit 
+                    (get amount-per-period schedule)
+                    (get beneficiary schedule))))
+                (map-set vesting-schedules schedule-id
+                    (merge schedule {
+                        periods-remaining: (- (get periods-remaining schedule) u1),
+                        next-retirement: (+ (get next-retirement schedule) 
+                                          (get period-length schedule))
+                    }))
+                (ok true))
+            ERR-NOT-AUTHORIZED)))
+
+
+
+(define-map volume-discount-tiers uint {
+    min-amount: uint,
+    discount-bps: uint
+})
+
+(define-data-var base-price-per-credit uint u1000)
+(define-data-var tier-count uint u0)
+
+(define-public (add-discount-tier (min-amount uint) (discount-bps uint))
+    (if (is-eq tx-sender (var-get contract-owner))
+        (begin
+            (map-set volume-discount-tiers (var-get tier-count) {
+                min-amount: min-amount,
+                discount-bps: discount-bps
+            })
+            (var-set tier-count (+ (var-get tier-count) u1))
+            (ok true))
+        ERR-NOT-AUTHORIZED))
+
+(define-read-only (calculate-discounted-price (amount uint))
+    (let ((base-total (* amount (var-get base-price-per-credit))))
+        (fold check-tier-discount
+              (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9)
+              base-total)))
+(define-private (check-tier-discount (tier uint) (current-price uint))
+    (match (map-get? volume-discount-tiers tier)
+        discount-tier
+        (if (>= current-price (get min-amount discount-tier))
+            (- current-price 
+               (/ (* current-price (get discount-bps discount-tier)) u10000))
+            current-price)
+        current-price))
+
+(define-constant ERR-POLICY-NOT-FOUND (err u106))
+(define-constant ERR-CLAIM-ALREADY-SUBMITTED (err u107))
+(define-constant ERR-INSUFFICIENT-POOL-FUNDS (err u108))
+(define-constant ERR-CLAIM-EXPIRED (err u109))
+(define-constant ERR-INVALID-COVERAGE (err u110))
+
+(define-data-var insurance-pool-balance uint u0)
+(define-data-var policy-nonce uint u0)
+(define-data-var claim-nonce uint u0)
+(define-data-var base-premium-rate uint u50)
+
+(define-map insurance-policies uint {
+    policyholder: principal,
+    offset-id: uint,
+    coverage-amount: uint,
+    premium-paid: uint,
+    expiry-height: uint,
+    active: bool
+})
+
+(define-map insurance-claims uint {
+    policy-id: uint,
+    claimant: principal,
+    claim-amount: uint,
+    reason: (string-utf8 100),
+    submitted-height: uint,
+    status: uint,
+    payout-amount: uint
+})
+
+(define-map policy-claims uint uint)
+
+(define-public (purchase-insurance (offset-id uint) (coverage-amount uint) (coverage-period uint))
+    (let 
+        ((policy-id (var-get policy-nonce))
+         (premium (calculate-premium coverage-amount coverage-period))
+         (offset (unwrap! (map-get? verified-offsets offset-id) ERR-INVALID-AMOUNT)))
+        (if (is-eq tx-sender (get owner offset))
+            (begin
+                (try! (stx-transfer? premium tx-sender (as-contract tx-sender)))
+                (map-set insurance-policies policy-id {
+                    policyholder: tx-sender,
+                    offset-id: offset-id,
+                    coverage-amount: coverage-amount,
+                    premium-paid: premium,
+                    expiry-height: (+ stacks-block-height coverage-period),
+                    active: true
+                })
+                (var-set insurance-pool-balance (+ (var-get insurance-pool-balance) premium))
+                (var-set policy-nonce (+ policy-id u1))
+                (ok policy-id))
+            ERR-NOT-AUTHORIZED)))
+
+(define-public (submit-claim (policy-id uint) (claim-amount uint) (reason (string-utf8 100)))
+    (let 
+        ((policy (unwrap! (map-get? insurance-policies policy-id) ERR-POLICY-NOT-FOUND))
+         (claim-id (var-get claim-nonce))
+         (existing-claim (map-get? policy-claims policy-id)))
+        (if (and 
+            (is-eq tx-sender (get policyholder policy))
+            (get active policy)
+            (< stacks-block-height (get expiry-height policy))
+            (<= claim-amount (get coverage-amount policy))
+            (is-none existing-claim))
+            (begin
+                (map-set insurance-claims claim-id {
+                    policy-id: policy-id,
+                    claimant: tx-sender,
+                    claim-amount: claim-amount,
+                    reason: reason,
+                    submitted-height: stacks-block-height,
+                    status: u0,
+                    payout-amount: u0
+                })
+                (map-set policy-claims policy-id claim-id)
+                (var-set claim-nonce (+ claim-id u1))
+                (ok claim-id))
+            (if (is-some existing-claim)
+                ERR-CLAIM-ALREADY-SUBMITTED
+                (if (>= stacks-block-height (get expiry-height policy))
+                    ERR-CLAIM-EXPIRED
+                    (if (> claim-amount (get coverage-amount policy))
+                        ERR-INVALID-COVERAGE
+                        ERR-NOT-AUTHORIZED))))))
+
+(define-public (process-claim (claim-id uint) (approved bool) (payout-amount uint))
+    (let 
+        ((claim (unwrap! (map-get? insurance-claims claim-id) ERR-POLICY-NOT-FOUND))
+         (policy (unwrap! (map-get? insurance-policies (get policy-id claim)) ERR-POLICY-NOT-FOUND)))
+        (if (is-eq tx-sender (var-get contract-owner))
+            (if approved
+                (if (>= (var-get insurance-pool-balance) payout-amount)
+                    (begin
+                        (try! (as-contract (stx-transfer? payout-amount tx-sender (get claimant claim))))
+                        (map-set insurance-claims claim-id (merge claim {
+                            status: u1,
+                            payout-amount: payout-amount
+                        }))
+                        (map-set insurance-policies (get policy-id claim) (merge policy {active: false}))
+                        (var-set insurance-pool-balance (- (var-get insurance-pool-balance) payout-amount))
+                        (ok true))
+                    ERR-INSUFFICIENT-POOL-FUNDS)
+                (begin
+                    (map-set insurance-claims claim-id (merge claim {status: u2}))
+                    (ok false)))
+            ERR-NOT-AUTHORIZED)))
+
+(define-public (add-to-insurance-pool (amount uint))
+    (begin
+        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+        (var-set insurance-pool-balance (+ (var-get insurance-pool-balance) amount))
+        (ok true)))
+
+(define-public (set-premium-rate (new-rate uint))
+    (if (is-eq tx-sender (var-get contract-owner))
+        (begin
+            (var-set base-premium-rate new-rate)
+            (ok true))
+        ERR-NOT-AUTHORIZED))
+
+(define-read-only (calculate-premium (coverage-amount uint) (coverage-period uint))
+    (let 
+        ((base-premium (/ (* coverage-amount (var-get base-premium-rate)) u10000))
+         (period-multiplier (/ coverage-period u1000)))
+        (+ base-premium (* base-premium period-multiplier))))
+
+(define-read-only (get-insurance-policy (policy-id uint))
+    (map-get? insurance-policies policy-id))
+
+(define-read-only (get-insurance-claim (claim-id uint))
+    (map-get? insurance-claims claim-id))
+
+(define-read-only (get-pool-balance)
+    (var-get insurance-pool-balance))
+
+(define-read-only (get-policy-claim (policy-id uint))
+    (map-get? policy-claims policy-id))
+
+(define-read-only (estimate-premium (coverage-amount uint) (coverage-period uint))
+    (calculate-premium coverage-amount coverage-period))
