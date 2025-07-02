@@ -662,3 +662,182 @@
 
 (define-read-only (estimate-premium (coverage-amount uint) (coverage-period uint))
     (calculate-premium coverage-amount coverage-period))
+
+
+(define-constant ERR-NO-PORTFOLIO-DATA (err u111))
+(define-constant ERR-INSUFFICIENT-ACTIVITY (err u112))
+
+(define-data-var analytics-nonce uint u0)
+
+(define-map user-portfolio-analytics principal {
+    total-invested: uint,
+    current-value: uint,
+    total-offsets: uint,
+    avg-rating: uint,
+    diversity-score: uint,
+    last-updated: uint
+})
+
+(define-map portfolio-performance-history uint {
+    user: principal,
+    timestamp: uint,
+    total-value: uint,
+    offset-count: uint,
+    roi-percentage: uint
+})
+
+(define-map category-allocation principal {
+    reforestation: uint,
+    renewable-energy: uint,
+    methane-capture: uint,
+    other: uint
+})
+
+(define-map performance-metrics principal {
+    thirty-day-roi: uint,
+    ninety-day-roi: uint,
+    annual-roi: uint,
+    volatility-score: uint,
+    sustainability-score: uint
+})
+
+(define-public (update-portfolio-analytics)
+    (let 
+        ((user tx-sender)
+         (analytics-id (var-get analytics-nonce))
+         (user-balance (ft-get-balance carbon-credit user))
+         (current-price (var-get last-price)))
+        (if (> user-balance u0)
+            (begin
+                (map-set user-portfolio-analytics user {
+                    total-invested: user-balance,
+                    current-value: (* user-balance current-price),
+                    total-offsets: user-balance,
+                    avg-rating: (calculate-user-avg-rating user),
+                    diversity-score: (calculate-diversity-score user),
+                    last-updated: stacks-block-height
+                })
+                (map-set portfolio-performance-history analytics-id {
+                    user: user,
+                    timestamp: stacks-block-height,
+                    total-value: (* user-balance current-price),
+                    offset-count: user-balance,
+                    roi-percentage: (calculate-roi user)
+                })
+                (unwrap! (update-category-allocation user) (err  u113))
+                (unwrap! (update-performance-metrics user) (err u114))
+                (var-set analytics-nonce (+ analytics-id u1))
+                (ok true))
+            ERR-NO-PORTFOLIO-DATA)))
+
+(define-private (calculate-user-avg-rating (user principal))
+    (let ((user-offset (default-to u0 (map-get? user-offsets user))))
+        (if (> user-offset u0)
+            (fold sum-ratings (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9) u0)
+            u0)))
+
+(define-private (sum-ratings (offset-id uint) (total uint))
+    (match (map-get? offset-ratings offset-id)
+        rating-data
+        (let ((avg-rating (/ (get rating rating-data) (get rater-count rating-data))))
+            (+ total avg-rating))
+        total))
+
+(define-private (calculate-diversity-score (user principal))
+    (let 
+        ((reforestation-count (count-category-offsets user CATEGORY-REFORESTATION))
+         (renewable-count (count-category-offsets user CATEGORY-RENEWABLE-ENERGY))
+         (methane-count (count-category-offsets user CATEGORY-METHANE-CAPTURE))
+         (total-categories (+ (if (> reforestation-count u0) u1 u0)
+                             (+ (if (> renewable-count u0) u1 u0)
+                                (if (> methane-count u0) u1 u0)))))
+        (* total-categories u33)))
+
+(define-private (count-category-offsets (user principal) (category uint))
+    (fold check-user-category-ownership (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9) u0))
+
+(define-private (check-user-category-ownership (offset-id uint) (count uint))
+    (match (map-get? verified-offsets offset-id)
+        offset-data
+        (if (and 
+            (is-eq (get owner offset-data) tx-sender)
+            (is-eq (default-to u0 (map-get? offset-categories offset-id)) 
+                   (unwrap-panic (map-get? offset-categories offset-id))))
+            (+ count u1)
+            count)
+        count))
+
+(define-private (calculate-roi (user principal))
+    (let 
+        ((current-analytics (map-get? user-portfolio-analytics user))
+         (current-value (* (ft-get-balance carbon-credit user) (var-get last-price))))
+        (match current-analytics
+            analytics
+            (if (> (get total-invested analytics) u0)
+                (/ (* (- current-value (get total-invested analytics)) u10000)
+                   (get total-invested analytics))
+                u0)
+            u0)))
+
+(define-private (update-category-allocation (user principal))
+    (let 
+        ((reforestation-amount (count-category-offsets user CATEGORY-REFORESTATION))
+         (renewable-amount (count-category-offsets user CATEGORY-RENEWABLE-ENERGY))
+         (methane-amount (count-category-offsets user CATEGORY-METHANE-CAPTURE))
+         (total-amount (ft-get-balance carbon-credit user)))
+        (map-set category-allocation user {
+            reforestation: (if (> total-amount u0) (/ (* reforestation-amount u100) total-amount) u0),
+            renewable-energy: (if (> total-amount u0) (/ (* renewable-amount u100) total-amount) u0),
+            methane-capture: (if (> total-amount u0) (/ (* methane-amount u100) total-amount) u0),
+            other: (if (> total-amount u0) 
+                      (- u100 (+ (/ (* reforestation-amount u100) total-amount)
+                                (+ (/ (* renewable-amount u100) total-amount)
+                                   (/ (* methane-amount u100) total-amount))))
+                      u0)
+        })
+        (ok true)))
+
+(define-private (update-performance-metrics (user principal))
+    (let 
+        ((current-roi (calculate-roi user))
+         (volatility (calculate-volatility user))
+         (sustainability (calculate-sustainability-score user)))
+        (map-set performance-metrics user {
+            thirty-day-roi: current-roi,
+            ninety-day-roi: current-roi,
+            annual-roi: current-roi,
+            volatility-score: volatility,
+            sustainability-score: sustainability
+        })
+        (ok true)))
+
+(define-private (calculate-volatility (user principal))
+    (let ((balance (ft-get-balance carbon-credit user)))
+        (if (> balance u100)
+            u25
+            (if (> balance u50)
+                u50
+                u75))))
+
+(define-private (calculate-sustainability-score (user principal))
+    (let ((diversity (calculate-diversity-score user)))
+        (+ diversity u50)))
+
+(define-read-only (get-portfolio-analytics (user principal))
+    (map-get? user-portfolio-analytics user))
+
+(define-read-only (get-portfolio-performance (user principal))
+    (map-get? performance-metrics user))
+
+(define-read-only (get-category-allocation (user principal))
+    (map-get? category-allocation user))
+
+(define-read-only (get-portfolio-recommendations (user principal))
+    (let 
+        ((diversity (calculate-diversity-score user))
+         (sustainability (calculate-sustainability-score user)))
+        (if (< diversity u67)
+            {recommendation: u"diversify-portfolio", priority: u1}
+            (if (< sustainability u60)
+                {recommendation: u"increase-sustainability", priority: u2}
+                {recommendation: u"maintain-balance", priority: u3}))))
