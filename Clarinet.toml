@@ -9,6 +9,11 @@ requirements = []
 path = 'contracts/carbon-verification.clar'
 clarity_version = 3
 epoch = 3.1
+
+[contracts.carbon-auditing]
+path = 'contracts/carbon-auditing.clar'
+clarity_version = 3
+epoch = 3.1
 [repl.analysis]
 passes = ['check_checker']
 
