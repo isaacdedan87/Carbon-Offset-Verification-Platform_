@@ -364,3 +364,480 @@
                         })) u5)))
                 (ok true))
             ERR-NOT-AUTHORIZED)))
+
+
+;; Add new map
+(define-map scheduled-retirements uint {
+    retirement-height: uint,
+    amount: uint,
+    beneficiary: principal
+})
+
+(define-data-var retirement-nonce uint u0)
+
+;; Schedule retirement
+(define-public (schedule-retirement (amount uint) (blocks-until-retirement uint) (beneficiary principal))
+    (let 
+        ((retirement-id (var-get retirement-nonce))
+         (current-balance (ft-get-balance carbon-credit tx-sender)))
+        (if (>= current-balance amount)
+            (begin
+                (try! (transfer amount tx-sender (as-contract tx-sender)))
+                (map-set scheduled-retirements retirement-id {
+                    retirement-height: (+ stacks-block-height blocks-until-retirement),
+                    amount: amount,
+                    beneficiary: beneficiary
+                })
+                (var-set retirement-nonce (+ retirement-id u1))
+                (ok retirement-id))
+            ERR-INSUFFICIENT-BALANCE)))
+
+(define-public (execute-retirement (retirement-id uint))
+    (let ((retirement (unwrap! (map-get? scheduled-retirements retirement-id) ERR-INVALID-AMOUNT)))
+        (if (>= stacks-block-height (get retirement-height retirement))
+            (begin
+                (try! (as-contract (ft-burn? carbon-credit (get amount retirement) (get beneficiary retirement))))
+                (ok true))
+            ERR-NOT-AUTHORIZED)))
+
+
+
+(define-map price-oracle-data uint {
+    price: uint,
+    timestamp: uint,
+    oracle: principal
+})
+
+(define-map authorized-oracles principal bool)
+
+(define-data-var last-price uint u0)
+(define-data-var price-update-threshold uint u100)
+
+(define-public (register-oracle (oracle principal))
+    (if (is-eq tx-sender (var-get contract-owner))
+        (begin
+            (map-set authorized-oracles oracle true)
+            (ok true))
+        ERR-NOT-AUTHORIZED))
+
+(define-public (update-price (new-price uint))
+    (let ((is-oracle (default-to false (map-get? authorized-oracles tx-sender))))
+        (if is-oracle
+            (begin
+                (map-set price-oracle-data stacks-block-height {
+                    price: new-price,
+                    timestamp: stacks-block-height,
+                    oracle: tx-sender
+                })
+                (var-set last-price new-price)
+                (ok true))
+            ERR-NOT-AUTHORIZED)))
+
+(define-read-only (get-current-price)
+    (var-get last-price))
+
+
+
+(define-map vesting-schedules uint {
+    total-amount: uint,
+    amount-per-period: uint,
+    periods-remaining: uint,
+    period-length: uint,
+    next-retirement: uint,
+    beneficiary: principal
+})
+
+(define-data-var schedule-nonce uint u0)
+
+(define-public (create-vesting-schedule 
+    (total-amount uint) 
+    (periods uint)
+    (period-length uint)
+    (beneficiary principal))
+    (let 
+        ((schedule-id (var-get schedule-nonce))
+         (amount-per-period (/ total-amount periods)))
+        (try! (transfer total-amount tx-sender (as-contract tx-sender)))
+        (map-set vesting-schedules schedule-id {
+            total-amount: total-amount,
+            amount-per-period: amount-per-period,
+            periods-remaining: periods,
+            period-length: period-length,
+            next-retirement: (+ stacks-block-height period-length),
+            beneficiary: beneficiary
+        })
+        (var-set schedule-nonce (+ schedule-id u1))
+        (ok schedule-id)))
+
+(define-public (process-vesting-retirement (schedule-id uint))
+    (let ((schedule (unwrap! (map-get? vesting-schedules schedule-id) (err u105))))
+        (if (and 
+            (> (get periods-remaining schedule) u0)
+            (>= stacks-block-height (get next-retirement schedule)))
+            (begin
+                (try! (as-contract (ft-burn? carbon-credit 
+                    (get amount-per-period schedule)
+                    (get beneficiary schedule))))
+                (map-set vesting-schedules schedule-id
+                    (merge schedule {
+                        periods-remaining: (- (get periods-remaining schedule) u1),
+                        next-retirement: (+ (get next-retirement schedule) 
+                                          (get period-length schedule))
+                    }))
+                (ok true))
+            ERR-NOT-AUTHORIZED)))
+
+
+
+(define-map volume-discount-tiers uint {
+    min-amount: uint,
+    discount-bps: uint
+})
+
+(define-data-var base-price-per-credit uint u1000)
+(define-data-var tier-count uint u0)
+
+(define-public (add-discount-tier (min-amount uint) (discount-bps uint))
+    (if (is-eq tx-sender (var-get contract-owner))
+        (begin
+            (map-set volume-discount-tiers (var-get tier-count) {
+                min-amount: min-amount,
+                discount-bps: discount-bps
+            })
+            (var-set tier-count (+ (var-get tier-count) u1))
+            (ok true))
+        ERR-NOT-AUTHORIZED))
+
+(define-read-only (calculate-discounted-price (amount uint))
+    (let ((base-total (* amount (var-get base-price-per-credit))))
+        (fold check-tier-discount
+              (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9)
+              base-total)))
+(define-private (check-tier-discount (tier uint) (current-price uint))
+    (match (map-get? volume-discount-tiers tier)
+        discount-tier
+        (if (>= current-price (get min-amount discount-tier))
+            (- current-price 
+               (/ (* current-price (get discount-bps discount-tier)) u10000))
+            current-price)
+        current-price))
+
+(define-constant ERR-POLICY-NOT-FOUND (err u106))
+(define-constant ERR-CLAIM-ALREADY-SUBMITTED (err u107))
+(define-constant ERR-INSUFFICIENT-POOL-FUNDS (err u108))
+(define-constant ERR-CLAIM-EXPIRED (err u109))
+(define-constant ERR-INVALID-COVERAGE (err u110))
+
+(define-data-var insurance-pool-balance uint u0)
+(define-data-var policy-nonce uint u0)
+(define-data-var claim-nonce uint u0)
+(define-data-var base-premium-rate uint u50)
+
+(define-map insurance-policies uint {
+    policyholder: principal,
+    offset-id: uint,
+    coverage-amount: uint,
+    premium-paid: uint,
+    expiry-height: uint,
+    active: bool
+})
+
+(define-map insurance-claims uint {
+    policy-id: uint,
+    claimant: principal,
+    claim-amount: uint,
+    reason: (string-utf8 100),
+    submitted-height: uint,
+    status: uint,
+    payout-amount: uint
+})
+
+(define-map policy-claims uint uint)
+
+(define-public (purchase-insurance (offset-id uint) (coverage-amount uint) (coverage-period uint))
+    (let 
+        ((policy-id (var-get policy-nonce))
+         (premium (calculate-premium coverage-amount coverage-period))
+         (offset (unwrap! (map-get? verified-offsets offset-id) ERR-INVALID-AMOUNT)))
+        (if (is-eq tx-sender (get owner offset))
+            (begin
+                (try! (stx-transfer? premium tx-sender (as-contract tx-sender)))
+                (map-set insurance-policies policy-id {
+                    policyholder: tx-sender,
+                    offset-id: offset-id,
+                    coverage-amount: coverage-amount,
+                    premium-paid: premium,
+                    expiry-height: (+ stacks-block-height coverage-period),
+                    active: true
+                })
+                (var-set insurance-pool-balance (+ (var-get insurance-pool-balance) premium))
+                (var-set policy-nonce (+ policy-id u1))
+                (ok policy-id))
+            ERR-NOT-AUTHORIZED)))
+
+(define-public (submit-claim (policy-id uint) (claim-amount uint) (reason (string-utf8 100)))
+    (let 
+        ((policy (unwrap! (map-get? insurance-policies policy-id) ERR-POLICY-NOT-FOUND))
+         (claim-id (var-get claim-nonce))
+         (existing-claim (map-get? policy-claims policy-id)))
+        (if (and 
+            (is-eq tx-sender (get policyholder policy))
+            (get active policy)
+            (< stacks-block-height (get expiry-height policy))
+            (<= claim-amount (get coverage-amount policy))
+            (is-none existing-claim))
+            (begin
+                (map-set insurance-claims claim-id {
+                    policy-id: policy-id,
+                    claimant: tx-sender,
+                    claim-amount: claim-amount,
+                    reason: reason,
+                    submitted-height: stacks-block-height,
+                    status: u0,
+                    payout-amount: u0
+                })
+                (map-set policy-claims policy-id claim-id)
+                (var-set claim-nonce (+ claim-id u1))
+                (ok claim-id))
+            (if (is-some existing-claim)
+                ERR-CLAIM-ALREADY-SUBMITTED
+                (if (>= stacks-block-height (get expiry-height policy))
+                    ERR-CLAIM-EXPIRED
+                    (if (> claim-amount (get coverage-amount policy))
+                        ERR-INVALID-COVERAGE
+                        ERR-NOT-AUTHORIZED))))))
+
+(define-public (process-claim (claim-id uint) (approved bool) (payout-amount uint))
+    (let 
+        ((claim (unwrap! (map-get? insurance-claims claim-id) ERR-POLICY-NOT-FOUND))
+         (policy (unwrap! (map-get? insurance-policies (get policy-id claim)) ERR-POLICY-NOT-FOUND)))
+        (if (is-eq tx-sender (var-get contract-owner))
+            (if approved
+                (if (>= (var-get insurance-pool-balance) payout-amount)
+                    (begin
+                        (try! (as-contract (stx-transfer? payout-amount tx-sender (get claimant claim))))
+                        (map-set insurance-claims claim-id (merge claim {
+                            status: u1,
+                            payout-amount: payout-amount
+                        }))
+                        (map-set insurance-policies (get policy-id claim) (merge policy {active: false}))
+                        (var-set insurance-pool-balance (- (var-get insurance-pool-balance) payout-amount))
+                        (ok true))
+                    ERR-INSUFFICIENT-POOL-FUNDS)
+                (begin
+                    (map-set insurance-claims claim-id (merge claim {status: u2}))
+                    (ok false)))
+            ERR-NOT-AUTHORIZED)))
+
+(define-public (add-to-insurance-pool (amount uint))
+    (begin
+        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+        (var-set insurance-pool-balance (+ (var-get insurance-pool-balance) amount))
+        (ok true)))
+
+(define-public (set-premium-rate (new-rate uint))
+    (if (is-eq tx-sender (var-get contract-owner))
+        (begin
+            (var-set base-premium-rate new-rate)
+            (ok true))
+        ERR-NOT-AUTHORIZED))
+
+(define-read-only (calculate-premium (coverage-amount uint) (coverage-period uint))
+    (let 
+        ((base-premium (/ (* coverage-amount (var-get base-premium-rate)) u10000))
+         (period-multiplier (/ coverage-period u1000)))
+        (+ base-premium (* base-premium period-multiplier))))
+
+(define-read-only (get-insurance-policy (policy-id uint))
+    (map-get? insurance-policies policy-id))
+
+(define-read-only (get-insurance-claim (claim-id uint))
+    (map-get? insurance-claims claim-id))
+
+(define-read-only (get-pool-balance)
+    (var-get insurance-pool-balance))
+
+(define-read-only (get-policy-claim (policy-id uint))
+    (map-get? policy-claims policy-id))
+
+(define-read-only (estimate-premium (coverage-amount uint) (coverage-period uint))
+    (calculate-premium coverage-amount coverage-period))
+
+
+(define-constant ERR-NO-PORTFOLIO-DATA (err u111))
+(define-constant ERR-INSUFFICIENT-ACTIVITY (err u112))
+
+(define-data-var analytics-nonce uint u0)
+
+(define-map user-portfolio-analytics principal {
+    total-invested: uint,
+    current-value: uint,
+    total-offsets: uint,
+    avg-rating: uint,
+    diversity-score: uint,
+    last-updated: uint
+})
+
+(define-map portfolio-performance-history uint {
+    user: principal,
+    timestamp: uint,
+    total-value: uint,
+    offset-count: uint,
+    roi-percentage: uint
+})
+
+(define-map category-allocation principal {
+    reforestation: uint,
+    renewable-energy: uint,
+    methane-capture: uint,
+    other: uint
+})
+
+(define-map performance-metrics principal {
+    thirty-day-roi: uint,
+    ninety-day-roi: uint,
+    annual-roi: uint,
+    volatility-score: uint,
+    sustainability-score: uint
+})
+
+(define-public (update-portfolio-analytics)
+    (let 
+        ((user tx-sender)
+         (analytics-id (var-get analytics-nonce))
+         (user-balance (ft-get-balance carbon-credit user))
+         (current-price (var-get last-price)))
+        (if (> user-balance u0)
+            (begin
+                (map-set user-portfolio-analytics user {
+                    total-invested: user-balance,
+                    current-value: (* user-balance current-price),
+                    total-offsets: user-balance,
+                    avg-rating: (calculate-user-avg-rating user),
+                    diversity-score: (calculate-diversity-score user),
+                    last-updated: stacks-block-height
+                })
+                (map-set portfolio-performance-history analytics-id {
+                    user: user,
+                    timestamp: stacks-block-height,
+                    total-value: (* user-balance current-price),
+                    offset-count: user-balance,
+                    roi-percentage: (calculate-roi user)
+                })
+                (unwrap! (update-category-allocation user) (err  u113))
+                (unwrap! (update-performance-metrics user) (err u114))
+                (var-set analytics-nonce (+ analytics-id u1))
+                (ok true))
+            ERR-NO-PORTFOLIO-DATA)))
+
+(define-private (calculate-user-avg-rating (user principal))
+    (let ((user-offset (default-to u0 (map-get? user-offsets user))))
+        (if (> user-offset u0)
+            (fold sum-ratings (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9) u0)
+            u0)))
+
+(define-private (sum-ratings (offset-id uint) (total uint))
+    (match (map-get? offset-ratings offset-id)
+        rating-data
+        (let ((avg-rating (/ (get rating rating-data) (get rater-count rating-data))))
+            (+ total avg-rating))
+        total))
+
+(define-private (calculate-diversity-score (user principal))
+    (let 
+        ((reforestation-count (count-category-offsets user CATEGORY-REFORESTATION))
+         (renewable-count (count-category-offsets user CATEGORY-RENEWABLE-ENERGY))
+         (methane-count (count-category-offsets user CATEGORY-METHANE-CAPTURE))
+         (total-categories (+ (if (> reforestation-count u0) u1 u0)
+                             (+ (if (> renewable-count u0) u1 u0)
+                                (if (> methane-count u0) u1 u0)))))
+        (* total-categories u33)))
+
+(define-private (count-category-offsets (user principal) (category uint))
+    (fold check-user-category-ownership (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9) u0))
+
+(define-private (check-user-category-ownership (offset-id uint) (count uint))
+    (match (map-get? verified-offsets offset-id)
+        offset-data
+        (if (and 
+            (is-eq (get owner offset-data) tx-sender)
+            (is-eq (default-to u0 (map-get? offset-categories offset-id)) 
+                   (unwrap-panic (map-get? offset-categories offset-id))))
+            (+ count u1)
+            count)
+        count))
+
+(define-private (calculate-roi (user principal))
+    (let 
+        ((current-analytics (map-get? user-portfolio-analytics user))
+         (current-value (* (ft-get-balance carbon-credit user) (var-get last-price))))
+        (match current-analytics
+            analytics
+            (if (> (get total-invested analytics) u0)
+                (/ (* (- current-value (get total-invested analytics)) u10000)
+                   (get total-invested analytics))
+                u0)
+            u0)))
+
+(define-private (update-category-allocation (user principal))
+    (let 
+        ((reforestation-amount (count-category-offsets user CATEGORY-REFORESTATION))
+         (renewable-amount (count-category-offsets user CATEGORY-RENEWABLE-ENERGY))
+         (methane-amount (count-category-offsets user CATEGORY-METHANE-CAPTURE))
+         (total-amount (ft-get-balance carbon-credit user)))
+        (map-set category-allocation user {
+            reforestation: (if (> total-amount u0) (/ (* reforestation-amount u100) total-amount) u0),
+            renewable-energy: (if (> total-amount u0) (/ (* renewable-amount u100) total-amount) u0),
+            methane-capture: (if (> total-amount u0) (/ (* methane-amount u100) total-amount) u0),
+            other: (if (> total-amount u0) 
+                      (- u100 (+ (/ (* reforestation-amount u100) total-amount)
+                                (+ (/ (* renewable-amount u100) total-amount)
+                                   (/ (* methane-amount u100) total-amount))))
+                      u0)
+        })
+        (ok true)))
+
+(define-private (update-performance-metrics (user principal))
+    (let 
+        ((current-roi (calculate-roi user))
+         (volatility (calculate-volatility user))
+         (sustainability (calculate-sustainability-score user)))
+        (map-set performance-metrics user {
+            thirty-day-roi: current-roi,
+            ninety-day-roi: current-roi,
+            annual-roi: current-roi,
+            volatility-score: volatility,
+            sustainability-score: sustainability
+        })
+        (ok true)))
+
+(define-private (calculate-volatility (user principal))
+    (let ((balance (ft-get-balance carbon-credit user)))
+        (if (> balance u100)
+            u25
+            (if (> balance u50)
+                u50
+                u75))))
+
+(define-private (calculate-sustainability-score (user principal))
+    (let ((diversity (calculate-diversity-score user)))
+        (+ diversity u50)))
+
+(define-read-only (get-portfolio-analytics (user principal))
+    (map-get? user-portfolio-analytics user))
+
+(define-read-only (get-portfolio-performance (user principal))
+    (map-get? performance-metrics user))
+
+(define-read-only (get-category-allocation (user principal))
+    (map-get? category-allocation user))
+
+(define-read-only (get-portfolio-recommendations (user principal))
+    (let 
+        ((diversity (calculate-diversity-score user))
+         (sustainability (calculate-sustainability-score user)))
+        (if (< diversity u67)
+            {recommendation: u"diversify-portfolio", priority: u1}
+            (if (< sustainability u60)
+                {recommendation: u"increase-sustainability", priority: u2}
+                {recommendation: u"maintain-balance", priority: u3}))))
